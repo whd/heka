@@ -3,15 +3,6 @@ JournalCtlInput
 
 Read from the systemd journal via the journalctl command.
 
-A note on implementation:
-
-In order to avoid writing a custom stream parser for the systemd
-`export format <http://www.freedesktop.org/wiki/Software/systemd/export/>`_
-this implementation uses systemd's
-`JSON format <http://www.freedesktop.org/wiki/Software/systemd/json/>`_.
-This is somewhat inefficient and an export format parser would be preferred,
-but by using JSON with TokenParser the implementation is greatly simplified.
-
 Config:
 
 - bin (string):

@@ -18,7 +18,6 @@ package systemd
 import (
 	"bufio"
 	"code.google.com/p/go-uuid/uuid"
-	"encoding/json"
 	"fmt"
 	"github.com/mozilla-services/heka/message"
 	. "github.com/mozilla-services/heka/pipeline"
@@ -56,13 +55,13 @@ type JournalCtlInput struct {
 	decoderName string
 	cmd         *exec.Cmd
 
-	stdoutChan chan string
+	stdoutChan chan [][2]string
 	stderrChan chan string
 	stdout     *io.PipeReader
 	stderr     *io.PipeReader
 
 	stopChan chan bool
-	parser   StreamParser
+	parser   JournalCtlStreamParser
 
 	pConfig *PipelineConfig
 
@@ -143,7 +142,7 @@ func (pi *JournalCtlInput) Init(config interface{}) (err error) {
 		return fmt.Errorf("bad match in %s", conf.Matches)
 	}
 
-	pi.stdoutChan = make(chan string)
+	pi.stdoutChan = make(chan [][2]string)
 	pi.stderrChan = make(chan string)
 	pi.stopChan = make(chan bool)
 	pi.first = true
@@ -168,7 +167,7 @@ func (pi *JournalCtlInput) Init(config interface{}) (err error) {
 		pi.cursor = ""
 	}
 
-	args := []string{"-o", "json", "--no-pager", "--all", "--follow"}
+	args := []string{"-o", "export", "--no-pager", "--all", "--follow"}
 	if pi.cursor != "" {
 		args = append(args, []string{"--after-cursor", pi.cursor}...)
 	}
@@ -180,7 +179,7 @@ func (pi *JournalCtlInput) Init(config interface{}) (err error) {
 	pi.stderr, pi.cmd.Stderr = io.Pipe()
 
 	pi.decoderName = conf.Decoder
-	tp := NewTokenParser()
+	tp := NewJournalCtlParser()
 	pi.parser = tp
 
 	pi.heka_pid = int32(os.Getpid())
@@ -201,7 +200,8 @@ func (pi *JournalCtlInput) Run(ir InputRunner, h PluginHelper) error {
 	var (
 		pack    *PipelinePack
 		dRunner DecoderRunner
-		data    string
+		data    [][2]string
+		stderr  string
 	)
 	ok := true
 
@@ -225,6 +225,8 @@ func (pi *JournalCtlInput) Run(ir InputRunner, h PluginHelper) error {
 			if !ok {
 				break
 			}
+			// FIXME check cursor before writing to pack or recycle the pack at
+			// any rate
 			atomic.AddInt64(&pi.processMessageCount, 1)
 			pack = <-packSupply
 			cursor := pi.writeToPack(data, pack, "stdout")
@@ -245,15 +247,15 @@ func (pi *JournalCtlInput) Run(ir InputRunner, h PluginHelper) error {
 				return err
 			}
 
-		case data = <-pi.stderrChan:
+		case stderr = <-pi.stderrChan:
 			pi.ir.LogError(fmt.Errorf("%s", data))
 			// Try to do some journalctl-specific cleanup.
-			if strings.HasPrefix(data, "Failed to seek to cursor") {
+			if strings.HasPrefix(stderr, "Failed to seek to cursor") {
 				// If the cursor is bad, unset it so that a restart does not try to
 				// use the same cursor. This behavior resembles LogstreamerInput's
 				// when presented with an invalid checkpoint.
 				pi.drop_cursor = true
-			} else if strings.HasPrefix(data, "Failed to add match") {
+			} else if strings.HasPrefix(stderr, "Failed to add match") {
 				// FIXME if matches are bad, journalctl will probably never
 				// succeed and this should be a fatal condition. Having the
 				// notion of both recoverable and unrecoverable errors doesn't
@@ -283,7 +285,7 @@ func (pi *JournalCtlInput) Run(ir InputRunner, h PluginHelper) error {
 	return nil
 }
 
-func (pi *JournalCtlInput) writeToPack(data string, pack *PipelinePack, stream_name string) (cursor string) {
+func (pi *JournalCtlInput) writeToPack(data [][2]string, pack *PipelinePack, stream_name string) (cursor string) {
 	pack.Message.SetUuid(uuid.NewRandom())
 	pack.Message.SetTimestamp(time.Now().UnixNano())
 	pack.Message.SetType("JournalCtlInput")
@@ -291,42 +293,19 @@ func (pi *JournalCtlInput) writeToPack(data string, pack *PipelinePack, stream_n
 	pack.Message.SetHostname(pi.hostname)
 	pack.Message.SetLogger(pi.ir.Name())
 
-	var j interface{}
-	err := json.Unmarshal([]byte(data), &j)
-	if err != nil {
-		pi.ir.LogError(err)
-		return
-	}
-	m := j.(map[string]interface{})
-
-	for k, v := range m {
-		switch vv := v.(type) {
-		case string:
-			if k == "__CURSOR" {
-				cursor = vv
-			} else if k == "MESSAGE" {
-				pack.Message.SetPayload(vv)
+	for _, v := range data {
+		k, f := v[0], v[1]
+		if k == "__CURSOR" {
+			cursor = f
+		} else if k == "MESSAGE" {
+			pack.Message.SetPayload(f)
+		} else {
+			fPInputName, err := message.NewField(k, f, "")
+			if err == nil {
+				pack.Message.AddField(fPInputName)
 			} else {
-				fPInputName, err := message.NewField(k, vv, "")
-				if err == nil {
-					pack.Message.AddField(fPInputName)
-				} else {
-					pi.ir.LogError(err)
-				}
+				pi.ir.LogError(err)
 			}
-		case []interface{}:
-			field := message.NewFieldInit(k, message.Field_STRING, "")
-			for _, u := range vv {
-				switch v2 := u.(type) {
-				case string:
-					field.AddValue(v2)
-				default:
-					pi.ir.LogMessage(fmt.Sprintf("ignoring field in %s: %v (not a string)", k, v2))
-				}
-			}
-			pack.Message.AddField(field)
-		default:
-			fmt.Println(k, "is of a type I don't know how to handle", vv)
 		}
 	}
 
@@ -370,41 +349,35 @@ func (pi *JournalCtlInput) ParseErrorOutput(r io.Reader, outputChannel chan stri
 	}
 }
 
-func (pi *JournalCtlInput) ParseOutput(r io.Reader, outputChannel chan string) {
+func (pi *JournalCtlInput) ParseOutput(r io.Reader, outputChannel chan [][2]string) {
 	var (
-		record []byte
-		err    error
+		err   error
+		key   string
+		value string
+		data  [][2]string
+		final bool
 	)
 
+	data = [][2]string{}
 	for err == nil {
-		// Use configured StreamParser to split output from commands.
-		_, record, err = pi.parser.Parse(r)
-		if err != nil {
-			if err == io.EOF {
-				record = pi.parser.GetRemainingData()
-			} else if err == io.ErrShortBuffer {
-				pi.ir.LogError(fmt.Errorf("record exceeded MAX_RECORD_SIZE %d",
-					message.MAX_RECORD_SIZE))
-				err = nil // non-fatal, keep going
-			}
-		}
+		_, key, value, final, err = pi.parser.Parse(r)
+		// pi.ir.LogMessage(fmt.Sprintf("%s => %s", key, value))
 
-		if len(record) > 0 {
-			// Setup and send the Message
-			outputChannel <- string(record)
-		}
+		data = append(data, [2]string{key, value})
 
-		if err != nil {
-			// Go doesn't seem to have a good solution to streaming output
-			// between subprocesses.  It seems like you have to read *all* the
-			// content in a goroutine instead of just streaming the content.
-			//
-			// See: http://code.google.com/p/go/issues/detail?id=2266
-			// and http://golang.org/pkg/os/exec/#Cmd.StdoutPipe
-			if !strings.Contains(err.Error(), "read |0: bad file descriptor") &&
-				(err != io.EOF) {
-				pi.ir.LogError(fmt.Errorf("Stream Error [%s]", err.Error()))
-			}
+		// FIXME handle errors
+		// if err != nil {
+		// 	if err == io.EOF {
+		// 		record = pi.parser.GetRemainingData()
+		// 	} else if err == io.ErrShortBuffer {
+		// 		pi.ir.LogError(fmt.Errorf("record exceeded MAX_RECORD_SIZE %d",
+		// 			message.MAX_RECORD_SIZE))
+		// 		err = nil // non-fatal, keep going
+		// 	}
+		// }
+		if final {
+			outputChannel <- data
+			data = [][2]string{}
 		}
 	}
 }

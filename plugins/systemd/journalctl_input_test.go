@@ -79,6 +79,8 @@ func JournalCtlInputSpec(c gs.Context) {
 		})
 		c.Specify("ignores duplicate first message", func() {
 		})
+		c.Specify("properly discards large message", func() {
+		})
 
 	})
 }
