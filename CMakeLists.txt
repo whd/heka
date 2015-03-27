@@ -285,3 +285,4 @@ install(DIRECTORY "${CMAKE_SOURCE_DIR}/sandbox/lua/modules/" DESTINATION "share/
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/sandbox/lua/decoders/" DESTINATION "share/${CMAKE_PROJECT_NAME}/lua_decoders")
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/sandbox/lua/filters/" DESTINATION "share/${CMAKE_PROJECT_NAME}/lua_filters")
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/sandbox/lua/encoders/" DESTINATION "share/${CMAKE_PROJECT_NAME}/lua_encoders")
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/sandbox/lua/inputs/" DESTINATION "share/${CMAKE_PROJECT_NAME}/lua_inputs")
