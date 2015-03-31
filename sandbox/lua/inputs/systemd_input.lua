@@ -14,7 +14,8 @@ Config:
 
     use_fields = true
     whether to map systemd fields to top-level Heka fields
-    e.g. _HOSTNAME -> Fields[Hostname] etc.
+    e.g. _HOSTNAME -> Fields[Hostname] etc. This is superseded by
+    process_module_entry_point.
 
     process_module = nil
     module to load (if any) to further transform messages before injecting
@@ -22,7 +23,7 @@ Config:
 
     process_module_entry_point = nil
     method to call handing off the current table for further decoding. It is
-    expected that this method call inject_message()
+    expected that this method call inject_message().
 
     offset_method = "manual"
     The method used to determine at which offset to begin consuming messages.
@@ -32,10 +33,10 @@ Config:
     - *newest* Heka will start reading from the most recent available offset.
     - *oldest* Heka will start reading from the oldest available offset.
 
-    offset_file = nil (required)
+    offset_file = nil (required if offset_method is "manual")
     File to store the checkpoint in. Must be unique. Currently the sandbox API
-    does not access to Logger information so this file must be specified
-    explicitly.
+    does not provide access to Logger information so this file must be
+    specified explicitly.
 
 *Example Heka Configuration*
 
@@ -47,15 +48,18 @@ Config:
 
         [SystemdInput.config]
         matches = '["_SYSTEMD_UNIT=fxa-auth.service"]'
-
+        offset_method = "newest"
 --]]
 
 require "io"
 require "os"
-require "string"
 require "cjson"
-local d = require "debug"
-local debug = d.debug
+local s = require "string"
+local format = s.format
+local dbg = require "debug"
+local function debug (...)
+    dbg.debug("SystemdInput: " .. format(...))
+end
 
 local sj = require "systemd.journal"
 
@@ -63,8 +67,13 @@ local sj = require "systemd.journal"
 local matches = cjson.decode(read_config("matches") or "[]")
 
 local offset_method = read_config("offset_method") or "manual"
-local cursor
-local checkpoint_file = read_config("offset_file") or error("must specify offset_file")
+local cursor, checkpoint_file
+if offset_method == "manual" then
+    checkpoint_file = read_config("offset_file") or error("must specify offset_file")
+elseif offset_method and not (
+    offset_method == "newest" or offset_method == "oldest") then
+    error("offset_method must be one of 'manual', 'newest', or 'oldest'")
+end
 
 -- This is a cursory attempt at making a more "heka-ish"
 -- message. process_module_entry_point can be used to for arbitrary mappings
@@ -88,7 +97,7 @@ local fields_map = {
 }
 
 local function format_uuid(str)
-    s = ""
+    local s = ""
     for i in string.gmatch(str, "(..)") do
         s = s .. string.char(tonumber(i, 16))
     end
@@ -120,43 +129,55 @@ local function map_fields(tbl)
         end
     end
     inject_message(tbl)
+    return 0
 end
 
 local mod = read_config("process_module")
-local decoder = read_config("process_module_entry_point")
-if mod and not decoder then
-    error("must provide process_module_entry_point for module " .. mod)
+local decoder_name = read_config("process_module_entry_point")
+if mod and not decoder_name then
+    error(format(
+              "must provide process_module_entry_point for module %s", mod))
 elseif mod then
     mod = require(mod)
-    decoder = mod[decoder] or error("can't find method " .. " in module " .. mod)
+    decoder = mod[decoder_name] or error(
+        format("can't find function %s in module %s",
+                      decoder_name, mod))
 elseif read_config("use_fields") then
     decoder = map_fields
+    decoder_name = "map_fields"
 end
 
 function process_message()
     local j = assert(sj.open())
     j:set_data_threshold(0)
 
+    local fh, cursor
+    if offset_method == "manual" then
+        fh = io.open(checkpoint_file, "r")
+        if fh then
+            -- the systemd cursor is variable length, so we write out the cursor
+            -- with a newline to avoid having to truncate the checkpoint file
+            cursor = fh:read("*line")
+            debug("cursor: %s", cursor)
+            fh:close()
+            fh = assert(io.open(checkpoint_file, "r+"))
+        else
+            debug("checkpoint file %s doesn't exist, creating",
+                  checkpoint_file)
+            fh = assert(io.open(checkpoint_file, "w+"))
+        end
+        fh:setvbuf("no")
+    end
+
     for i, match in ipairs(matches) do
-        debug("adding match " .. match)
+        debug("adding match %s", match)
         assert(j:add_match(match))
     end
 
-    local fh = io.open(checkpoint_file, "r")
-    if fh then
-        -- the systemd cursor is variable length, so we write out the cursor
-        -- with a newline to avoid having to truncate the checkpoint file
-        cursor = fh:read("*line")
-        debug("cursor: " .. tostring(cursor))
-        fh:close()
-        fh = assert(io.open(checkpoint_file, "r+"))
-    else
-        fh = assert(io.open(checkpoint_file, "w+"))
-    end
-    fh:setvbuf("no")
+    debug("using offset method '%s'", offset_method)
     if cursor then
         if not j:seek_cursor(cursor) then
-            error("failed to seek to cursor" .. cursor)
+            error(format("failed to seek to cursor %s", cursor))
         end
         -- Note that [seek_cursor] does not actually make any entry the new
         -- current entry, this needs to be done in a separate step with a
@@ -165,15 +186,18 @@ function process_message()
 
         -- maybe issue a warning instead if this fails
         assert(j:test_cursor(cursor))
-    else
-        j:seek_tail()
+    elseif offset_method == "newest" then
+        assert(j:seek_tail())
+        j:previous()
+    elseif offset_method == "oldest" then
+        assert(j:seek_head())
         j:next()
     end
 
     local ready = j:next()
 
     while true do
-        debug("main loop iteration")
+        -- debug("main loop iteration")
         while not ready do
             if j:wait(1) ~= sj.WAKEUP.NOP then
                 ready = j:next()
@@ -190,17 +214,19 @@ function process_message()
         if decoder then
             local r, err = decoder(msg)
             if r ~= 0 then
-                debug(read_config("process_module_entry_point") .. " failed: " .. err)
+                debug("%s failed: %s", decoder_name, err or "")
             end
         else
             inject_message(msg)
         end
 
-        local offset, err = fh:seek("set")
-        if err then error(err) end
-        assert(offset == 0)
-        fh:write(cursor .. "\n")
-        fh:flush()
+        if offset_method == "manual" then
+            local offset, err = fh:seek("set")
+            if err then error(err) end
+            assert(offset == 0)
+            fh:write(cursor .. "\n")
+            fh:flush()
+        end
 
         ready = j:next()
     end
