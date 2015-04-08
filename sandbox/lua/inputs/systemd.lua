@@ -84,6 +84,14 @@ elseif offset_method and not (
                  "manual_newest", "manual_oldest", "newest", "oldest"))
 end
 
+local function format_uuid(str)
+    local s = ""
+    for i in string.gmatch(str, "(..)") do
+        s = s .. string.char(tonumber(i, 16))
+    end
+    return s
+end
+
 -- This is a cursory attempt at making a more "heka-ish"
 -- message. process_module_entry_point can be used to for arbitrary mappings
 -- and transformations.
@@ -104,14 +112,6 @@ local fields_map = {
     , _SYSTEMD_USER_UNIT = "Logger"
     , SYSLOG_IDENTIFIER = "Logger"
 }
-
-local function format_uuid(str)
-    local s = ""
-    for i in string.gmatch(str, "(..)") do
-        s = s .. string.char(tonumber(i, 16))
-    end
-    return s
-end
 
 -- see
 -- http://www.freedesktop.org/software/systemd/man/systemd.journal-fields.html
