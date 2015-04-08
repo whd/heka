@@ -25,15 +25,23 @@ Config:
     method to call handing off the current table for further decoding. It is
     expected that this method call inject_message().
 
-    offset_method = "manual"
+    offset_method = "manual_oldest"
     The method used to determine at which offset to begin consuming messages.
     The valid values are:
 
-    - *manual* Heka will track the offset and resume from where it last left off (default).
-    - *newest* Heka will start reading from the most recent available offset.
-    - *oldest* Heka will start reading from the oldest available offset.
+    - *manual_oldest*
+       Heka will track the offset and resume from where it last left off, or
+       else from the beginning of the journal if no checkpoint file exists
+       (default).
+    - *manual_newest*
+       Heka will track the offset and resume from where it last left off, or
+       else from the end of the journal if no checkpoint file exists.
+    - *newest*
+       Heka will start reading from the most recent available offset.
+    - *oldest*
+       Heka will start reading from the oldest available offset.
 
-    offset_file = nil (required if offset_method is "manual")
+    offset_file = nil (required if offset_method is "manual_oldest" or "manual_newest")
     File to store the checkpoint in. Must be unique. Currently the sandbox API
     does not provide access to Logger information so this file must be
     specified explicitly.
@@ -66,13 +74,14 @@ local sj = require "systemd.journal"
 -- TODO support disjunction
 local matches = cjson.decode(read_config("matches") or "[]")
 
-local offset_method = read_config("offset_method") or "manual"
+local offset_method = read_config("offset_method") or "manual_oldest"
 local cursor, checkpoint_file
-if offset_method == "manual" then
+if offset_method == "manual_newest" or offset_method == "manual_oldest" then
     checkpoint_file = read_config("offset_file") or error("must specify offset_file")
 elseif offset_method and not (
     offset_method == "newest" or offset_method == "oldest") then
-    error("offset_method must be one of 'manual', 'newest', or 'oldest'")
+    error(format("offset_method must be one of '%s', '%s', or '%s'",
+                 "manual_newest", "manual_oldest", "newest", "oldest"))
 end
 
 -- This is a cursory attempt at making a more "heka-ish"
@@ -150,15 +159,20 @@ end
 function process_message()
     local j = assert(sj.open())
     j:set_data_threshold(0)
+    local checkpoint = offset_method:match("manual")
 
     local fh, cursor
-    if offset_method == "manual" then
+    if checkpoint then
         fh = io.open(checkpoint_file, "r")
         if fh then
             -- the systemd cursor is variable length, so we write out the cursor
             -- with a newline to avoid having to truncate the checkpoint file
             cursor = fh:read("*line")
-            debug("cursor: %s", cursor)
+            if cursor then
+                debug("cursor: %s", cursor)
+            else
+                debug("empty checkpoint file")
+            end
             fh:close()
             fh = assert(io.open(checkpoint_file, "r+"))
         else
@@ -177,7 +191,9 @@ function process_message()
     debug("using offset method '%s'", offset_method)
     if cursor then
         if not j:seek_cursor(cursor) then
-            error(format("failed to seek to cursor %s", cursor))
+            fh:close()
+            os.remove(checkpoint_file)
+            error(format("failed to seek to cursor %s, removing checkpoint and stopping", cursor))
         end
         -- Note that [seek_cursor] does not actually make any entry the new
         -- current entry, this needs to be done in a separate step with a
@@ -186,10 +202,10 @@ function process_message()
 
         -- maybe issue a warning instead if this fails
         assert(j:test_cursor(cursor))
-    elseif offset_method == "newest" then
+    elseif offset_method:match("newest") then
         assert(j:seek_tail())
         j:previous()
-    elseif offset_method == "oldest" then
+    elseif offset_method:match("oldest") then
         assert(j:seek_head())
         j:next()
     end
@@ -197,7 +213,6 @@ function process_message()
     local ready = j:next()
 
     while true do
-        -- debug("main loop iteration")
         while not ready do
             if j:wait(1) ~= sj.WAKEUP.NOP then
                 ready = j:next()
@@ -220,7 +235,7 @@ function process_message()
             inject_message(msg)
         end
 
-        if offset_method == "manual" then
+        if checkpoint then
             local offset, err = fh:seek("set")
             if err then error(err) end
             assert(offset == 0)
