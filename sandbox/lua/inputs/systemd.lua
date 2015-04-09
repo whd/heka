@@ -104,7 +104,11 @@ local fields_map = {
     , _HOSTNAME = "Hostname"
     , _SOURCE_REALTIME_TIMESTAMP = {
         "Timestamp",
-        function (i) return tonumber(i) * 1e3 end
+        function (i) return i * 1e3 end
+    }
+    , __REALTIME_TIMESTAMP = {
+        "Timestamp",
+        function (i) return i * 1e3 end
     }
     , _PID = "PID"
     , PRIORITY = "Severity"
