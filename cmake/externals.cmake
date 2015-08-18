@@ -155,9 +155,27 @@ git_clone(https://github.com/crankycoder/xmlpath 670b185b686fd11aa115291fb2f6dc3
 git_clone(https://github.com/thoj/go-ircevent 90dc7f966b95d133f1c65531c6959b52effd5e40)
 git_clone(https://github.com/cactus/gostrftime 4544856e3a415ff5668bb75fed36726240ea1f8d)
 
-git_clone(https://github.com/golang/snappy eaa750b9bf4dcb7cb20454be850613b66cda3273)
-git_clone(https://github.com/rafrombrc/sarama fda3e239249dd96f4a2c446aea39dfc823f4030a)
-add_dependencies(sarama snappy)
+git_clone(https://github.com/golang/snappy master)
+# git_clone(https://github.com/rafrombrc/sarama fda3e239249dd96f4a2c446aea39dfc823f4030a)
+git_clone(https://github.com/wvanbergen/kafka master)
+git_clone(https://github.com/wvanbergen/kazoo-go master)
+git_clone(https://github.com/samuel/go-zookeeper master)
+externalproject_add(
+  sarama-shopify
+  GIT_REPOSITORY https://github.com/Shopify/sarama
+  GIT_TAG master
+  SOURCE_DIR "${PROJECT_PATH}/src/github.com/Shopify/sarama"
+  BUILD_COMMAND ""
+  CONFIGURE_COMMAND ""
+  INSTALL_COMMAND ""
+  UPDATE_COMMAND "" # comment out to enable updates
+  )
+add_dependencies(sarama-shopify snappy)
+add_dependencies(GoPackages sarama-shopify)
+git_clone(https://github.com/eapache/go-resiliency master)
+git_clone(https://github.com/eapache/queue master)
+
+# add_dependencies(sarama snappy)
 
 if (INCLUDE_GEOIP)
     add_external_plugin(git https://github.com/abh/geoip da130741c8ed2052f5f455d56e552f2e997e1ce9)
