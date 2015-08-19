@@ -143,6 +143,7 @@ func (k *KafkaConsumerGroupInput) Init(config interface{}) (err error) {
 		return
 	}
 	k.consumer = consumer
+	k.stopChan = make(chan bool)
 	return
 }
 
@@ -166,7 +167,6 @@ func (k *KafkaConsumerGroupInput) Run(ir pipeline.InputRunner, h pipeline.Plugin
 		sRunner.Done()
 	}()
 	k.ir = ir
-	k.stopChan = make(chan bool)
 
 	go func() {
 		for err := range k.consumer.Errors() {
