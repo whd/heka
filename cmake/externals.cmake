@@ -175,6 +175,9 @@ git_clone(https://github.com/eapache/go-resiliency v1.0.0)
 git_clone(https://github.com/eapache/queue v1.0.2)
 git_clone_to_path(https://github.com/rafrombrc/sarama 0e11051e66c97ea56a2ed09d66d6428e0b852a58 github.com/Shopify/sarama)
 git_clone(https://github.com/davecgh/go-spew 2df174808ee097f90d259e432cc04442cf60be21)
+git_clone(https://github.com/wvanbergen/kafka master)
+git_clone(https://github.com/wvanbergen/kazoo-go master)
+git_clone(https://github.com/samuel/go-zookeeper master)
 
 add_dependencies(sarama snappy)
 
